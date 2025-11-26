@@ -69,13 +69,13 @@ export default function ChatShell() {
   }
 
   return (
-    <div className="bg-white rounded-2xl border shadow-sm overflow-hidden">
+    <div className="bg-white rounded-2xl border shadow-sm">
       <div className="p-6 border-b">
         <h2 className="text-lg font-medium">Query Assistant</h2>
         <p className="text-sm text-slate-500">Ask questions about real estate data in natural language</p>
       </div>
 
-      <div className="h-[560px] flex flex-col">
+      <div className="h-[560px] flex flex-col overflow-y-scroll">
         <div className="flex-1 p-6">
           <div className="h-full border rounded-lg overflow-hidden flex flex-col">
             {/* message area */}
