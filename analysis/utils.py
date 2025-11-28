@@ -257,16 +257,40 @@ def chart_data_for_area(df: pd.DataFrame, area: str, last_n_years: int = None) -
     return {"labels": labels, "price": price_series, "demand": demand_series}
 
 def parse_query_text(q: str) -> Dict[str, Any]:
-    """Lightweight parser for sample queries (same as before)."""
+    """
+    Lightweight parser for sample queries.
+
+    Supports for example:
+    - "Compare Ambegaon Budruk and Aundh demand trends"
+    - "Compare Aundh with Wakad"
+    - "Compare Aundh vs Wakad"
+    - "Show price growth for Akurdi over the last 3 years"
+    - "Analyze Wakad"
+    """
     qlow = (q or "").lower()
-    cmp_match = re.search(r"compare\s+([a-z0-9\s]+)\s+and\s+([a-z0-9\s]+)", qlow)
+    # normalize whitespace a bit so regexes are easier
+    qlow = re.sub(r"\s+", " ", qlow).strip()
+
+    # 1) COMPARE intent
+    # allow: and / with / vs / versus
+    # allow extra trailing words like "demand trends", "price", "growth", etc.
+    cmp_match = re.search(
+        r"compare\s+([a-z0-9\s]+?)\s+"
+        r"(?:and|with|vs\.?|versus)\s+"
+        r"([a-z0-9\s]+?)"
+        r"(?:\s+(?:demand|price|growth|trend|trends).*)?$",
+        qlow,
+    )
     if cmp_match:
         a1 = cmp_match.group(1).strip()
         a2 = cmp_match.group(2).strip()
         return {"intent": "compare", "areas": [a1, a2]}
 
+    # 2) GROWTH intent: "price growth for X over the last N year(s)"
     growth_match = re.search(
-        r"price growth for\s+([a-z0-9\s]+)\s+(?:over the last|in the last)\s+(\d+)\s+year",
+        r"price growth for\s+([a-z0-9\s]+)\s+"
+        r"(?:over the last|in the last)\s+"
+        r"(\d+)\s+years?",
         qlow,
     )
     if growth_match:
@@ -274,6 +298,7 @@ def parse_query_text(q: str) -> Dict[str, Any]:
         n = int(growth_match.group(2))
         return {"intent": "growth", "areas": [area], "last_n_years": n}
 
+    # 3) ANALYZE intent: "analyze X", "analysis of X"
     analyze_match = re.search(r"analyz(?:e|is)\s+([a-z0-9\s]+)", qlow) or re.search(
         r"analysis of\s+([a-z0-9\s]+)", qlow
     )
@@ -281,77 +306,176 @@ def parse_query_text(q: str) -> Dict[str, Any]:
         area = analyze_match.group(1).strip()
         return {"intent": "analyze", "areas": [area]}
 
+    # 4) Fallback: assume analyze + last word as area
     words = re.findall(r"[a-z0-9]+", qlow)
     if words:
         return {"intent": "analyze", "areas": [" ".join(words[-1:])]}
+
     return {"intent": "analyze", "areas": []}
 
 def build_mock_summary(df_area: pd.DataFrame, area: str) -> str:
-    """Return a compact mocked summary using the detected columns."""
+    """
+    Build a more detailed, purely rule-based summary for an area.
+
+    It uses:
+    - detected price columns (weighted average rate etc.)
+    - detected demand column (total_sold_igr / total_units / similar)
+    - per-year aggregates to talk about trends
+    """
     if df_area is None or df_area.empty:
         return f"No data found for '{area}'."
 
-    # detect price & demand columns
-    price_cols = detect_price_column(df_area)
-    demand_col = detect_demand_column(df_area)
+    # normalise year column
     df_area = ensure_year_col(df_area)
 
-    # compute averages where possible
-    price_avg = None
-    if price_cols:
+    # detect columns
+    price_cols = detect_price_column(df_area)
+    demand_col = detect_demand_column(df_area)
+
+    # use only rows with a year
+    df_year = df_area.dropna(subset=["year"]).copy()
+    if df_year.empty:
+        return f"Data is available for '{area}', but year information is missing, so trends cannot be computed."
+
+    # ---------------------------
+    # per-year price aggregation
+    # ---------------------------
+    year_price: Dict[int, float] = {}
+    for year, grp in df_year.groupby("year"):
         vals = []
-        for pc in price_cols:
-            if pc in df_area.columns:
-                vals.append(pd.to_numeric(df_area[pc], errors="coerce"))
-        if vals:
-            stacked = pd.concat(vals, axis=1)
-            price_avg = stacked.mean(axis=1).mean()
+        for pc in price_cols or []:
+            if pc in grp.columns:
+                vals.append(pd.to_numeric(grp[pc], errors="coerce"))
+        if not vals:
+            continue
+        stacked = pd.concat(vals, axis=1)
+        # mean across columns, then mean for that year
+        year_price[int(year)] = float(stacked.mean(axis=1).mean())
+
+    # overall price stats
+    price_avg = None
+    price_min = None
+    price_max = None
+    first_price = None
+    last_price = None
+
+    if year_price:
+        years_sorted = sorted(year_price.keys())
+        prices_sorted = [year_price[y] for y in years_sorted]
+
+        price_avg = float(np.nanmean(prices_sorted))
+        price_min = float(np.nanmin(prices_sorted))
+        price_max = float(np.nanmax(prices_sorted))
+        first_price = prices_sorted[0]
+        last_price = prices_sorted[-1]
+
+    # ---------------------------
+    # per-year demand aggregation
+    # ---------------------------
+    year_demand: Dict[int, float] = {}
+    if demand_col and demand_col in df_year.columns:
+        for year, grp in df_year.groupby("year"):
+            v = pd.to_numeric(grp[demand_col], errors="coerce")
+            if not v.dropna().empty:
+                year_demand[int(year)] = float(v.mean())
+    elif "total_units" in df_year.columns:
+        for year, grp in df_year.groupby("year"):
+            v = pd.to_numeric(grp["total_units"], errors="coerce")
+            if not v.dropna().empty:
+                year_demand[int(year)] = float(v.mean())
 
     demand_avg = None
-    if demand_col and demand_col in df_area.columns:
-        demand_avg = pd.to_numeric(df_area[demand_col], errors="coerce").mean()
-    elif "total_units" in df_area.columns:
-        demand_avg = pd.to_numeric(df_area["total_units"], errors="coerce").mean()
+    demand_min = None
+    demand_max = None
+    demand_min_year = None
+    demand_max_year = None
 
-    parts = [f"Summary for {area.title()}:"]
+    if year_demand:
+        years_d = sorted(year_demand.keys())
+        vals_d = [year_demand[y] for y in years_d]
+        demand_avg = float(np.nanmean(vals_d))
+        demand_min = float(np.nanmin(vals_d))
+        demand_max = float(np.nanmax(vals_d))
+        # year of min / max demand
+        demand_min_year = years_d[int(np.nanargmin(vals_d))]
+        demand_max_year = years_d[int(np.nanargmax(vals_d))]
 
+    # ---------------------------
+    # basic metadata
+    # ---------------------------
     try:
-        min_year = int(df_area["year"].min()) if not df_area["year"].isna().all() else None
-        max_year = int(df_area["year"].max()) if not df_area["year"].isna().all() else None
+        min_year = int(df_year["year"].min())
+        max_year = int(df_year["year"].max())
     except Exception:
         min_year = max_year = None
+
+    parts: List[str] = []
+    parts.append(f"Summary for {area.title()}:")
+
     if min_year and max_year:
-        parts.append(f"Data available from {min_year} to {max_year}.")
+        n_years = max_year - min_year + 1
+        parts.append(f"Data is available from {min_year} to {max_year} (about {n_years} year(s) of history).")
 
-    if price_avg is not None and not pd.isna(price_avg):
-        parts.append(f"Average price (approx): {round(float(price_avg),2)}.")
-    if demand_avg is not None and not pd.isna(demand_avg):
-        parts.append(f"Average demand/volume (approx): {round(float(demand_avg),2)}.")
+    # price stats sentences
+    if price_avg is not None and not np.isnan(price_avg):
+        p_avg = round(price_avg, 2)
+        if price_min is not None and price_max is not None:
+            p_min = round(price_min, 2)
+            p_max = round(price_max, 2)
+            parts.append(
+                f"The typical (average) price across the period is around {p_avg}. "
+                f"Observed yearly prices generally range between {p_min} and {p_max}."
+            )
+        else:
+            parts.append(f"The typical (average) price across the period is around {p_avg}.")
 
-    # simple trend check using flat-weighted or available price series
-    try:
-        by_year = df_area.dropna(subset=["year"]).groupby("year")
-        price_series = []
-        for year, grp in by_year:
-            # compute year-level price as mean of chosen price columns
-            vals = []
-            for pc in price_cols:
-                if pc in grp.columns:
-                    vals.append(pd.to_numeric(grp[pc], errors="coerce"))
-            if vals:
-                price_series.append(vals[0].mean())
-        if len(price_series) >= 2:
-            start = price_series[0]
-            end = price_series[-1]
-            if start and start != 0:
-                pct = (end - start) / start * 100
-                parts.append(f"Price change (first->last): {round(float(pct),1)}%.")
-    except Exception:
-        pass
+    # trend sentence based on first vs last year
+    if first_price is not None and last_price is not None and first_price > 0:
+        pct_change = (last_price - first_price) / first_price * 100.0
+        direction: str
+        if pct_change > 8:
+            direction = "has grown strongly"
+        elif pct_change > 2:
+            direction = "has grown moderately"
+        elif pct_change > -2:
+            direction = "has been broadly stable"
+        elif pct_change > -8:
+            direction = "has softened slightly"
+        else:
+            direction = "has declined noticeably"
+        parts.append(
+            f"From the first year in the dataset to the most recent year, the price {direction}, "
+            f"changing by roughly {round(pct_change, 1)}% overall."
+        )
 
-    parts.append("This is a mocked summary. For human-like summaries, integrate an LLM.")
+    # demand stats sentences
+    if demand_avg is not None and not np.isnan(demand_avg):
+        d_avg = round(demand_avg, 1)
+        base_name = demand_col or "total_units"
+        label = base_name.replace("_", " ")
+        parts.append(
+            f"The average demand (based on '{label}') is about {d_avg} units per year."
+        )
+
+        if demand_min is not None and demand_max is not None:
+            d_min = round(demand_min, 1)
+            d_max = round(demand_max, 1)
+            if demand_max_year is not None and demand_min_year is not None:
+                parts.append(
+                    f"Demand peaked around {demand_max_year} at roughly {d_max} units, "
+                    f"while the weakest year was {demand_min_year} with about {d_min} units."
+                )
+            else:
+                parts.append(
+                    f"Across the period, yearly demand tends to stay between about {d_min} and {d_max} units."
+                )
+
+    # final note
+    parts.append(
+        "This summary is rule-based and uses simple averages and year-over-year changes. "
+    )
+
     return " ".join(parts)
-
 # --------------------
 # Utility: list areas
 # --------------------
