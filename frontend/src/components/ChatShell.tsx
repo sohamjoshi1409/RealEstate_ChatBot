@@ -1,105 +1,137 @@
 // src/components/ChatShell.tsx
-import { useState, useRef, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import MessageList from "./MessageList";
 import ChatInput from "./ChatInput";
 import { postQuery } from "../api";
-import type { SingleResponse } from "../types";
+import type { SingleResponse, CompareResponse } from "../types";
 
-type Msg = {
+type ChatMessage = {
   role: "user" | "bot";
-  text?: string;
-  data?: SingleResponse | null;
-  showChart?: boolean;
+  text?: string;                         // for user text or simple bot text
+  single?: SingleResponse;               // for single-area results
+  compare?: CompareResponse;             // for compare results
+  showChart?: boolean;                   // for single results (chart toggle)
 };
 
 export default function ChatShell() {
-  const [messages, setMessages] = useState<Msg[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // scroll to bottom when messages change
+  // auto-scroll to bottom on message change
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    // small delay to allow DOM to update
     requestAnimationFrame(() => {
       el.scrollTop = el.scrollHeight;
     });
   }, [messages]);
 
   async function handleSubmit(text: string) {
-    // push user message
-    setMessages((m) => [...m, { role: "user", text }]);
+    if (!text.trim()) return;
 
-    // insert temporary bot placeholder
-    setMessages((m) => [...m, { role: "bot", text: "Analyzing...", showChart: false }]);
+    // 1. add user message
+    setMessages((prev) => [...prev, { role: "user", text }]);
+
+    // 2. temporary bot "Analyzing..."
+    setMessages((prev) => [...prev, { role: "bot", text: "Analyzing..." }]);
     setLoading(true);
 
     try {
       const payload = { query: text, use_preloaded: true };
       const res = await postQuery(payload);
 
-      // replace last placeholder with actual response object
+      // remove placeholder & add real response
       setMessages((prev) => {
-        const copy = prev.slice(0, -1); // remove placeholder
-        copy.push({ role: "bot", data: res as SingleResponse, showChart: false });
+        const copy = prev.slice(0, -1); // drop last placeholder
+
+        if (res.type === "compare") {
+          const compareRes = res as CompareResponse;
+          copy.push({ role: "bot", compare: compareRes });
+        } else {
+          const singleRes = res as SingleResponse;
+          copy.push({ role: "bot", single: singleRes, showChart: false });
+        }
+
         return copy;
       });
     } catch (err) {
+      console.error(err);
       setMessages((prev) => {
         const copy = prev.slice(0, -1);
-        copy.push({ role: "bot", text: "Sorry — an error occurred. Try again." });
+        copy.push({
+          role: "bot",
+          text: "Sorry — something went wrong while analyzing that query.",
+        });
         return copy;
       });
-      console.error(err);
     } finally {
       setLoading(false);
     }
   }
 
-  // toggle chart visibility for message index i
+  // toggle chart for a single-response bot message
   function toggleChart(idx: number) {
     setMessages((prev) => {
       const copy = [...prev];
-      const msg = { ...copy[idx] };
-      msg.showChart = !msg.showChart;
-      copy[idx] = msg;
+      const msg = copy[idx];
+      if (msg && msg.single) {
+        copy[idx] = { ...msg, showChart: !msg.showChart };
+      }
       return copy;
     });
   }
 
   return (
-    <div className="bg-white rounded-2xl border shadow-sm">
+    <div className="bg-white rounded-2xl border shadow-sm overflow-hidden">
       <div className="p-6 border-b">
         <h2 className="text-lg font-medium">Query Assistant</h2>
-        <p className="text-sm text-slate-500">Ask questions about real estate data in natural language</p>
+        <p className="text-sm text-slate-500">
+          Ask questions about real estate data in natural language
+        </p>
       </div>
 
       <div className="h-[560px] flex flex-col overflow-y-scroll">
         <div className="flex-1 p-6">
           <div className="h-full border rounded-lg overflow-hidden flex flex-col">
-            {/* message area */}
+            {/* messages */}
             <div ref={scrollRef} className="flex-1 chat-scroll p-6">
-              <div className="chat-inner">
-                {messages.length === 0 ? (
-                  <div className="text-center max-w-2xl mx-auto">
+              {messages.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-center max-w-2xl mx-auto">
+                  <div>
                     <div className="mb-6 text-slate-300">
-                      {/* simple robot icon */}
                       <svg width="56" height="56" viewBox="0 0 24 24" fill="none">
-                        <rect x="3" y="7" width="18" height="10" rx="2" stroke="#CBD5E1" strokeWidth="1.5" />
+                        <rect
+                          x="3"
+                          y="7"
+                          width="18"
+                          height="10"
+                          rx="2"
+                          stroke="#CBD5E1"
+                          strokeWidth="1.5"
+                        />
                         <rect x="7" y="11" width="2" height="2" rx="0.5" fill="#CBD5E1" />
                         <rect x="11" y="11" width="2" height="2" rx="0.5" fill="#CBD5E1" />
                       </svg>
                     </div>
-                    <h3 className="text-xl font-semibold text-slate-800 mb-2">Welcome to Real Estate Analytics</h3>
-                    <p className="text-slate-500">Ask me anything about real estate data. Try queries like "Analyze Wakad" or "Compare Ambegaon Budruk and Aundh".</p>
+                    <h3 className="text-xl font-semibold text-slate-800 mb-2">
+                      Welcome to Real Estate Analytics
+                    </h3>
+                    <p className="text-slate-500">
+                      Ask me anything about real estate data. Try queries like{" "}
+                      <span className="font-medium">"Analyze Wakad"</span> or{" "}
+                      <span className="font-medium">
+                        "Compare Ambegaon Budruk and Aundh demand trends".
+                      </span>
+                    </p>
                   </div>
-                ) : (
-                  <MessageList messages={messages} onToggleChart={toggleChart} />
-                )}
-              </div>
+                </div>
+              ) : (
+                <MessageList messages={messages} onToggleChart={toggleChart} />
+              )}
             </div>
 
+            {/* input */}
             <div className="p-4 border-t">
               <ChatInput onSubmit={handleSubmit} disabled={loading} />
             </div>
